@@ -1016,4 +1016,123 @@ mod tests {
         let result = console_key_pressed(&input, &config);
         assert!(!result);
     }
+
+    // Tests for hierarchical completion
+    use trie_rs::TrieBuilder;
+
+    fn build_test_trie() -> Trie<u8> {
+        let mut builder = TrieBuilder::new();
+        builder.push("spawn");
+        builder.push("help");
+        builder.push("helpgame");
+        builder.push("clear");
+        builder.build()
+    }
+
+    fn build_test_subcommands() -> HashMap<String, Vec<String>> {
+        let mut map = HashMap::new();
+        map.insert(
+            "spawn".to_string(),
+            vec!["grunt".to_string(), "heavy".to_string(), "drone".to_string()],
+        );
+        map
+    }
+
+    #[test]
+    fn test_hierarchical_partial_command() {
+        // Typing "spa" should show only "spawn" (not subcommands)
+        let trie = build_test_trie();
+        let subcommands = build_test_subcommands();
+        let words = vec!["spa".to_string()];
+
+        let (suggestions, showing_subcommands) =
+            compute_hierarchical_suggestions(&words, false, &Some(trie), &subcommands, 10);
+
+        assert_eq!(suggestions, vec!["spawn"]);
+        assert!(!showing_subcommands);
+    }
+
+    #[test]
+    fn test_hierarchical_command_with_space() {
+        // Typing "spawn " should show all subcommands
+        let trie = build_test_trie();
+        let subcommands = build_test_subcommands();
+        let words = vec!["spawn".to_string()];
+
+        let (suggestions, showing_subcommands) =
+            compute_hierarchical_suggestions(&words, true, &Some(trie), &subcommands, 10);
+
+        assert_eq!(suggestions, vec!["grunt", "heavy", "drone"]);
+        assert!(showing_subcommands);
+    }
+
+    #[test]
+    fn test_hierarchical_partial_subcommand() {
+        // Typing "spawn g" should filter to matching subcommands
+        let trie = build_test_trie();
+        let subcommands = build_test_subcommands();
+        let words = vec!["spawn".to_string(), "g".to_string()];
+
+        let (suggestions, showing_subcommands) =
+            compute_hierarchical_suggestions(&words, false, &Some(trie), &subcommands, 10);
+
+        assert_eq!(suggestions, vec!["grunt"]);
+        assert!(showing_subcommands);
+    }
+
+    #[test]
+    fn test_hierarchical_no_subcommands() {
+        // Typing "help " for a command without subcommands
+        let trie = build_test_trie();
+        let subcommands = build_test_subcommands();
+        let words = vec!["help".to_string()];
+
+        let (suggestions, showing_subcommands) =
+            compute_hierarchical_suggestions(&words, true, &Some(trie), &subcommands, 10);
+
+        assert!(suggestions.is_empty());
+        assert!(showing_subcommands);
+    }
+
+    #[test]
+    fn test_hierarchical_complete_subcommand() {
+        // Typing "spawn grunt " should have no more suggestions
+        let trie = build_test_trie();
+        let subcommands = build_test_subcommands();
+        let words = vec!["spawn".to_string(), "grunt".to_string()];
+
+        let (suggestions, showing_subcommands) =
+            compute_hierarchical_suggestions(&words, true, &Some(trie), &subcommands, 10);
+
+        assert!(suggestions.is_empty());
+        assert!(!showing_subcommands);
+    }
+
+    #[test]
+    fn test_apply_completion_base_command() {
+        let mut state = ConsoleState::default();
+        state.buf = "spa".to_string();
+
+        let mut cache = ConsoleCache::default();
+        cache.predictions_cache = vec!["spawn".to_string()];
+        cache.showing_subcommands = false;
+
+        apply_completion(&mut state, &cache, 0);
+
+        assert_eq!(state.buf, "spawn ");
+    }
+
+    #[test]
+    fn test_apply_completion_subcommand() {
+        let mut state = ConsoleState::default();
+        state.buf = "spawn ".to_string();
+
+        let mut cache = ConsoleCache::default();
+        cache.predictions_cache = vec!["grunt".to_string(), "heavy".to_string()];
+        cache.showing_subcommands = true;
+
+        apply_completion(&mut state, &cache, 0);
+
+        assert_eq!(state.buf, "spawn grunt ");
+    }
 }
