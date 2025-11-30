@@ -60,11 +60,35 @@ fn init(config: Res<ConsoleConfiguration>, mut cache: ResMut<ConsoleCache>) {
         trie_builder.push(cmd);
     }
 
+    // Legacy arg_completions support - add full sequences to trie
     for completions in &config.arg_completions {
         trie_builder.push(completions.join(" "));
     }
 
     cache.commands_trie = Some(trie_builder.build());
+
+    // Copy subcommand_completions to cache for hierarchical completion
+    cache.subcommand_completions = config.subcommand_completions.clone();
+
+    // Also convert legacy arg_completions to subcommand_completions format
+    // This allows backward compatibility with the old API
+    for completions in &config.arg_completions {
+        if completions.len() >= 2 {
+            let cmd = &completions[0];
+            let subcommand = &completions[1];
+            cache
+                .subcommand_completions
+                .entry(cmd.clone())
+                .or_default()
+                .push(subcommand.clone());
+        }
+    }
+
+    // Deduplicate subcommand lists
+    for subs in cache.subcommand_completions.values_mut() {
+        subs.sort();
+        subs.dedup();
+    }
 }
 
 impl Plugin for ConsolePlugin {

@@ -17,7 +17,7 @@ use bevy_egui::{
 use clap::{CommandFactory, FromArgMatches};
 use core::str;
 use shlex::Shlex;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::BuildHasher;
 use std::marker::PhantomData;
 use std::mem;
@@ -264,6 +264,10 @@ pub struct ConsoleConfiguration {
     /// Custom completion sequences,
     /// for example [vec!["custom", "foo"]], will complete `custom foo` when typing `custom`
     pub arg_completions: Vec<Vec<String>>,
+    /// Hierarchical subcommand completions for Smart Tab behavior.
+    /// Maps a command name to its available subcommands.
+    /// Example: ("spawn", vec!["grunt", "heavy"]) means typing "spawn " will suggest "grunt", "heavy"
+    pub subcommand_completions: HashMap<String, Vec<String>>,
 }
 
 #[derive(Resource, Default)]
@@ -274,6 +278,10 @@ pub struct ConsoleCache {
     pub(crate) predictions_hash_key: Option<u64>,
     pub(crate) predictions_cache: Vec<String>,
     pub(crate) prediction_matches_buffer: bool,
+    /// Cached subcommand completions for hierarchical completion
+    pub(crate) subcommand_completions: HashMap<String, Vec<String>>,
+    /// Whether current predictions are subcommands (for display purposes)
+    pub(crate) showing_subcommands: bool,
 }
 
 impl Default for ConsoleConfiguration {
@@ -298,6 +306,7 @@ impl Default for ConsoleConfiguration {
             block_mouse: false,
             block_keyboard: false,
             arg_completions: Default::default(),
+            subcommand_completions: Default::default(),
         }
     }
 }
@@ -314,14 +323,15 @@ impl Clone for ConsoleConfiguration {
             history_size: self.history_size,
             symbol: self.symbol.clone(),
             arg_completions: self.arg_completions.clone(),
-            collapsible: false,
-            title_name: "Console".to_string(),
-            resizable: true,
-            moveable: true,
-            show_title_bar: true,
-            background_color: Color32::from_black_alpha(102),
-            foreground_color: Color32::LIGHT_GRAY,
-            num_suggestions: 4,
+            subcommand_completions: self.subcommand_completions.clone(),
+            collapsible: self.collapsible,
+            title_name: self.title_name.clone(),
+            resizable: self.resizable,
+            moveable: self.moveable,
+            show_title_bar: self.show_title_bar,
+            background_color: self.background_color,
+            foreground_color: self.foreground_color,
+            num_suggestions: self.num_suggestions,
             block_mouse: self.block_mouse,
             block_keyboard: self.block_keyboard,
         }
@@ -445,6 +455,11 @@ fn style_ansi_text(str: &str, config: &ConsoleConfiguration) -> LayoutJob {
 
 /// Recompute predictions for the console based on the current buffer content.
 /// if the buffer does not change the predictions are not recomputed.
+///
+/// Supports hierarchical completion:
+/// - Partial command (no space): search base commands only
+/// - Command + space: show all subcommands for that command
+/// - Command + space + partial: filter subcommands by prefix
 pub(crate) fn recompute_predictions(
     state: &mut ConsoleState,
     cache: &mut ConsoleCache,
@@ -454,6 +469,7 @@ pub(crate) fn recompute_predictions(
         cache.predictions_cache.clear();
         cache.predictions_hash_key = None;
         cache.prediction_matches_buffer = false;
+        cache.showing_subcommands = false;
         state.suggestion_index = None;
         return;
     }
@@ -467,31 +483,103 @@ pub(crate) fn recompute_predictions(
     };
 
     if recompute {
+        let has_trailing_space = state.buf.ends_with(' ');
         let words = Shlex::new(&state.buf).collect::<Vec<_>>();
-        let query = words.join(" ");
 
-        let suggestions = match &cache.commands_trie {
-            Some(trie) if !query.is_empty() => trie
-                .predictive_search(query)
-                .into_iter()
-                .take(suggestion_count)
-                .collect(),
-            _ => vec![],
-        };
-        cache.predictions_cache = suggestions
-            .into_iter()
-            .map(|s| String::from_utf8(s).unwrap_or_default())
-            .collect();
+        let (suggestions, showing_subcommands) = compute_hierarchical_suggestions(
+            &words,
+            has_trailing_space,
+            &cache.commands_trie,
+            &cache.subcommand_completions,
+            suggestion_count,
+        );
 
+        cache.predictions_cache = suggestions;
+        cache.showing_subcommands = showing_subcommands;
         cache.predictions_hash_key = Some(hash);
         state.suggestion_index = None;
         cache.prediction_matches_buffer = false;
 
+        // Check if single prediction matches buffer exactly
         if let Some(first) = cache.predictions_cache.first() {
-            if cache.predictions_cache.len() == 1 && first == &state.buf {
-                cache.prediction_matches_buffer = true
+            if cache.predictions_cache.len() == 1 {
+                // For subcommands, check if "command subcommand" matches buffer
+                if cache.showing_subcommands && words.len() >= 1 {
+                    let full_completion = format!("{} {}", words[0], first);
+                    if full_completion == state.buf.trim() {
+                        cache.prediction_matches_buffer = true;
+                    }
+                } else if first == &state.buf {
+                    cache.prediction_matches_buffer = true;
+                }
             }
         }
+    }
+}
+
+/// Compute suggestions based on hierarchical command structure
+fn compute_hierarchical_suggestions(
+    words: &[String],
+    has_trailing_space: bool,
+    commands_trie: &Option<Trie<u8>>,
+    subcommand_completions: &HashMap<String, Vec<String>>,
+    suggestion_count: usize,
+) -> (Vec<String>, bool) {
+    match (words.len(), has_trailing_space) {
+        // No input - no suggestions
+        (0, _) => (vec![], false),
+
+        // Partial command (no trailing space) - search base commands only
+        (1, false) => {
+            let query = &words[0];
+            let suggestions = match commands_trie {
+                Some(trie) if !query.is_empty() => {
+                    trie.predictive_search(query.as_str())
+                        .into_iter()
+                        .take(suggestion_count)
+                        .filter_map(|s| String::from_utf8(s).ok())
+                        // Filter to only base commands (no spaces)
+                        .filter(|s| !s.contains(' '))
+                        .collect()
+                }
+                _ => vec![],
+            };
+            (suggestions, false)
+        }
+
+        // Complete command + trailing space - show all subcommands
+        (1, true) => {
+            let cmd = &words[0];
+            let suggestions = subcommand_completions
+                .get(cmd)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .take(suggestion_count)
+                .collect();
+            (suggestions, true)
+        }
+
+        // Command + partial subcommand (no trailing space) - filter subcommands
+        (2, false) => {
+            let cmd = &words[0];
+            let partial = &words[1];
+            let suggestions = subcommand_completions
+                .get(cmd)
+                .map(|subs| {
+                    subs.iter()
+                        .filter(|s| s.starts_with(partial.as_str()))
+                        .take(suggestion_count)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            (suggestions, true)
+        }
+
+        // Command + complete subcommand + space - no more suggestions
+        // Or more than 2 words - no hierarchical completion
+        _ => (vec![], false),
     }
 }
 
@@ -657,15 +745,22 @@ pub(crate) fn console_ui(
                         set_cursor_pos(ui.ctx(), text_edit_response.id, state.buf.len());
                     }
 
-                    // handle tab cycling through suggestions
+                    // Smart Tab: handle tab completion with hierarchical support
                     if ui.input(|i| i.key_pressed(egui::Key::Tab))
                         && !cache.predictions_cache.is_empty()
                     {
-                        match &mut state.suggestion_index {
-                            Some(index) => {
-                                *index = (*index + 1) % cache.predictions_cache.len();
-                            }
-                            None => {
+                        if cache.predictions_cache.len() == 1 {
+                            // Single match - auto-complete immediately
+                            apply_completion(&mut state, &cache, 0);
+                            set_cursor_pos(ui.ctx(), text_edit_response.id, state.buf.len());
+                        } else {
+                            // Multiple matches - cycle or confirm
+                            if let Some(index) = state.suggestion_index {
+                                // Already have a selection - confirm it
+                                apply_completion(&mut state, &cache, index);
+                                set_cursor_pos(ui.ctx(), text_edit_response.id, state.buf.len());
+                            } else {
+                                // Start cycling through suggestions
                                 state.suggestion_index = Some(0);
                             }
                         }
@@ -769,6 +864,29 @@ fn set_cursor_pos(ctx: &Context, id: Id, pos: usize) {
             .set_char_range(Some(CCursorRange::one(CCursor::new(pos))));
         state.store(ctx, id);
     }
+}
+
+/// Apply a completion from the suggestions to the buffer
+fn apply_completion(state: &mut ConsoleState, cache: &ConsoleCache, suggestion_index: usize) {
+    if suggestion_index >= cache.predictions_cache.len() {
+        return;
+    }
+
+    let completion = &cache.predictions_cache[suggestion_index];
+
+    if cache.showing_subcommands {
+        // For subcommands, we need to preserve the command and append the subcommand
+        let words: Vec<_> = Shlex::new(&state.buf).collect();
+        if !words.is_empty() {
+            state.buf = format!("{} {} ", words[0], completion);
+        }
+    } else {
+        // For base commands, replace entire buffer and add trailing space
+        state.buf = format!("{} ", completion);
+    }
+
+    // Clear suggestion state since we've applied it
+    state.suggestion_index = None;
 }
 
 pub fn block_mouse_input(
