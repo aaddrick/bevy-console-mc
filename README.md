@@ -1,11 +1,41 @@
-# bevy_console
-[![Check](https://github.com/RichoDemus/bevy-console/actions/workflows/build.yaml/badge.svg)](https://github.com/RichoDemus/bevy-console/actions/workflows/build.yaml)
+# bevy_console_mc
+
+> ⚠️ **Fork Notice**: This is a fork of [bevy-console](https://github.com/makspll/bevy-console) with Minecraft-style Smart Tab autocomplete behavior. **This fork is not intended for long-term maintenance** - it was created to implement a specific feature. Please use the upstream repository for production use, or consider contributing this feature upstream.
+
+[![Check](https://github.com/aaddrick/bevy-console-mc/actions/workflows/build.yaml/badge.svg)](https://github.com/aaddrick/bevy-console-mc/actions/workflows/build.yaml)
 
 A simple *Half-Life* inspired console with support for argument parsing powered by [`clap`](https://docs.rs/clap/latest/clap/).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/richodemus/bevy-console/main/doc/screenshot.png" width="100%">
 </p>
+
+## Fork Changes
+
+This fork adds **hierarchical Smart Tab autocomplete**:
+
+- **Hierarchical suggestions**: Typing `spa` shows only `spawn` (the command). After typing `spawn ` (with space), subcommands like `grunt`, `heavy`, etc. appear.
+- **Smart Tab behavior**:
+  - Single match → Tab auto-completes immediately
+  - Multiple matches → Tab cycles through dropdown, Tab again on selected item confirms it
+
+### New Configuration
+
+```rust
+use std::collections::HashMap;
+
+let mut subcommands = HashMap::new();
+subcommands.insert("spawn".to_string(), vec!["grunt".to_string(), "heavy".to_string()]);
+
+ConsoleConfiguration {
+    subcommand_completions: subcommands,
+    ..Default::default()
+}
+```
+
+The existing `arg_completions` API is still supported and automatically converted to hierarchical completions.
+
+---
 
 ## Features
 - [x] Command parsing with `clap`
@@ -87,4 +117,4 @@ Some shortcuts:
 
 - Ctrl + L: Clear history
 - Ctrl + C: Clear line
-- Tab: Line completion
+- Tab: Line completion (Smart Tab - see Fork Changes above)
